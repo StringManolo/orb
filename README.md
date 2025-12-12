@@ -104,10 +104,10 @@ orb install parseCLI --allow-insecure-repos
 Create `my_script.sh`:
 ```bash
 #!/usr/bin/env bash
-# orb import parseCLI 1.0.0
+# orb import parseCLI 1.0.1
 
 # Your code here
-echo "Using parseCLI library"
+echo "Using $(cli color bold yellow parseCLI) library" # cli color is from parseCLI
 ```
 
 ### 4. Bundle for distribution
