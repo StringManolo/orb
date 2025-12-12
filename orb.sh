@@ -1572,13 +1572,186 @@ bundle_file() {
   debug "Output file location: $(realpath "${output_file}" 2>/dev/null || echo "${output_file}")"
 }
 
+self_update() {
+  debug "Entering self_update function"
+  
+  log "Checking for updates..."
+  
+  local main_url="https://raw.githubusercontent.com/stringmanolo/orb/main/orb.sh"
+  local master_url="https://raw.githubusercontent.com/stringmanolo/orb/master/orb.sh"
+  
+  local temp_file
+  temp_file="$(mktemp)"
+  local download_success=false
+  
+  debug "Trying main branch..."
+  if command -v curl &>/dev/null; then
+    if curl -sSLf -o "$temp_file" "$main_url"; then
+      download_success=true
+    fi
+  elif command -v wget &>/dev/null; then
+    if wget -q -O "$temp_file" "$main_url"; then
+      download_success=true
+    fi
+  fi
+  
+  if [[ "$download_success" != "true" ]]; then
+    debug "Main branch failed, trying master branch..."
+    if command -v curl &>/dev/null; then
+      curl -sSLf -o "$temp_file" "$master_url" 2>/dev/null && download_success=true
+    elif command -v wget &>/dev/null; then
+      wget -q -O "$temp_file" "$master_url" 2>/dev/null && download_success=true
+    fi
+  fi
+  
+  if [[ "$download_success" != "true" ]]; then
+    error "Failed to download update"
+    rm -f "$temp_file"
+    return 1
+  fi
+  
+  local new_version
+  new_version="$(grep -m1 '^ORB_VERSION=' "$temp_file" | cut -d'"' -f2 2>/dev/null || echo "")"
+  
+  if [[ -z "$new_version" ]]; then
+    error "Could not determine new version"
+    rm -f "$temp_file"
+    return 1
+  fi
+  
+  debug "Current version: $ORB_VERSION, New version: $new_version"
+  
+  if [[ "$ORB_VERSION" == "$new_version" ]]; then
+    log "Already up to date (v$ORB_VERSION)"
+    rm -f "$temp_file"
+    return 0
+  fi
+  
+  log "New version available: v$new_version"
+  log "Current version: v$ORB_VERSION"
+  
+  local force=false
+  for arg in "$@"; do
+    if [[ "$arg" == "--force" ]]; then
+      force=true
+    fi
+  done
+  
+  if [[ "$force" != "true" ]]; then
+    echo ""
+    read -rp "Update to v$new_version? [y/N]: " answer
+    if [[ "$answer" != "y" ]] && [[ "$answer" != "Y" ]]; then
+      log "Update cancelled"
+      rm -f "$temp_file"
+      return 0
+    fi
+  fi
+  
+  local backup_file="$0.backup.$(date +%Y%m%d_%H%M%S)"
+  debug "Creating backup: $backup_file"
+  
+  if ! cp "$0" "$backup_file"; then
+    error "Failed to create backup"
+    rm -f "$temp_file"
+    return 1
+  fi
+  
+  chmod +x "$temp_file"
+  
+  debug "Replacing current file with new version"
+  
+  if cat "$temp_file" > "$0"; then
+    chmod +x "$0"
+    
+    rm -f "$temp_file"
+    
+    log ""
+    log "   Update successful!"
+    log "   Backup saved as: $backup_file"
+    log "   New version: v$new_version"
+    log ""
+    log "Please run your command again."
+    
+    exit 0
+  else
+    error "Failed to update. Restoring backup..."
+    
+    if cp "$backup_file" "$0"; then
+      chmod +x "$0"
+      log "Restored from backup"
+    else
+      error "CRITICAL: Failed to restore from backup!"
+      error "Please manually restore from: $backup_file"
+    fi
+    
+    rm -f "$temp_file"
+    return 1
+  fi
+}
+
+check_update() {
+  debug "Entering check_update function"
+  
+  log "Checking for updates..."
+  
+  local main_url="https://raw.githubusercontent.com/stringmanolo/orb/main/orb.sh"
+  local new_version=""
+  
+  if command -v curl &>/dev/null; then
+    new_version="$(curl -sSLf "$main_url" 2>/dev/null | grep -m1 '^ORB_VERSION=' | cut -d'"' -f2 || true)"
+  elif command -v wget &>/dev/null; then
+    new_version="$(wget -q -O- "$main_url" 2>/dev/null | grep -m1 '^ORB_VERSION=' | cut -d'"' -f2 || true)"
+  fi
+  
+  if [[ -z "$new_version" ]]; then
+    error "Could not check for updates"
+    return 1
+  fi
+  
+  if [[ "$ORB_VERSION" == "$new_version" ]]; then
+    log "You have the latest version (v$ORB_VERSION)"
+    return 0
+  else
+    log "Update available!"
+    log "Current: v$ORB_VERSION"
+    log "Latest:  v$new_version"
+    log ""
+    log "Run 'orb --update' to update"
+    return 0
+  fi
+}
+
 main() {
   debug "=== orb ${ORB_VERSION} starting ==="
   debug "Command line arguments: $*"
   debug "ORB_HOME: ${ORB_HOME}"
   debug "Current working directory: $(pwd)"
   debug "User: $(whoami)"
-  
+
+  # Check for updates if last time command ran was 1 week ago
+  local last_check_file="${ORB_HOME}/.last_update_check"
+  local current_time=$(date +%s)
+  local last_check_time=0
+
+  if [[ -f "$last_check_file" ]]; then
+    last_check_time=$(cat "$last_check_file" 2>/dev/null || echo "0")
+  fi
+
+  # Check once per week (604800 seconds)
+  if [[ $((current_time - last_check_time)) -gt 604800 ]]; then
+    echo "$current_time" > "$last_check_file"
+
+    # Run check in background to not interrupt user
+    (
+      if check_update 2>/dev/null | grep -q "Update available"; then
+        echo ""
+        echo "   Update available for orb!"
+        echo "   Run 'orb --update' to get the latest version."
+        echo ""
+      fi
+    ) &
+  fi
+
   case "${1:-}" in
     --help|-h)
       debug "Showing help"
@@ -1589,22 +1762,30 @@ Usage:
   orb <command> [options]
 
 Commands:
-  install <package> [version]   Install a package
+  install <package> [version]   Install a package (local by default)
   uninstall <package>           Uninstall a package
   list                          List available packages
   bundle <file> [output]        Bundle a file with imports
+  init <name> [version]         Initialize a new orb project
   --allow-insecure-repo <url>   Add an insecure repository
+  
+Update Commands:
+  --update, self-update         Update orb to the latest version
+  --check-update                Check for updates without installing
+  --force-update                Update without confirmation
+  
+Options:
+  --allow-insecure-repos        Allow insecure repositories for install/list
+  --global                      Install/uninstall globally
+  --force                       Force uninstall without confirmation
   --version                     Show version
   --help                        Show this help
 
-Options:
-  --allow-insecure-repos        Allow insecure repositories for install/list
-
 Debug:
-  Set ORB_DEBUG=1 in environment for debug output
+  Set ORB_DEBUG=1 for debug output
 EOF
       ;;
-    
+
     --version|-v)
       debug "Showing version"
       echo "orb ${ORB_VERSION}"
@@ -1737,6 +1918,21 @@ EOF
       bundle_file "$2" "${3:-}"
       ;;
     
+    --update|self-update|upgrade)
+      debug "Processing update command"
+      self_update "$@"
+      ;;
+    
+    --check-update)
+      debug "Processing check-update command"
+      check_update
+      ;;
+    
+    --force-update)
+      debug "Processing force-update command"
+      self_update "--force"
+      ;;
+
     "")
       debug "No command specified, showing help"
       error "No command specified"
