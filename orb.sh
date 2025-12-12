@@ -2,7 +2,9 @@
 
 set -euo pipefail
 
-ORB_VERSION="0.1.0"
+: "${ORB_DEBUG:=0}"
+
+ORB_VERSION="0.1.1"
 ORB_HOME="${HOME}/.orb"
 ORB_CACHE="${ORB_HOME}/cache"
 ORB_INSTALLED="${ORB_HOME}/installed"
