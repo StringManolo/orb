@@ -31,7 +31,7 @@ die() {
   debug "Stack trace:"
   local frame=0
   while caller $frame; do
-    ((frame++))
+    frame=$((frame + 1))
   done >&2
   exit 1
 }
@@ -43,40 +43,111 @@ download() {
   
   local url="$1"
   local output="$2"
+  local max_retries=3
+  local retry_count=0
+  local curl_exit=0
   
-  if command -v curl &>/dev/null; then
-    debug "Using curl for download"
-    curl -sSLf -A "${USER_AGENT}" -o "${output}" "${url}" 2>&1 | while read -r line; do
-      debug "curl: $line"
-    done
-    local curl_exit=$?
-    if [[ $curl_exit -ne 0 ]]; then
-      error "curl failed with exit code: $curl_exit"
-      error "Failed to download from: ${url}"
-      return $curl_exit
+  # Limpiar URL de comillas adicionales
+  url="$(echo "$url" | sed "s/^'//;s/'$//")"
+  debug "Cleaned URL: '$url'"
+  
+  while [[ $retry_count -lt $max_retries ]]; do
+    retry_count=$((retry_count + 1))
+    debug "Download attempt $retry_count of $max_retries"
+    
+    if command -v curl &>/dev/null; then
+      debug "Using curl with enhanced options"
+      
+      # Opciones mejoradas para curl:
+      # -L: Sigue redirecciones
+      # -f: Fall silenciosamente en errores HTTP
+      # -s: Modo silencioso
+      # -S: Muestra errores incluso en modo silencioso
+      # -A: User-Agent específico
+      # -H: Headers adicionales para GitHub
+      # --retry: Reintentar en fallos temporales
+      # --retry-delay: Esperar entre reintentos
+      # --retry-max-time: Tiempo máximo para reintentos
+      
+      curl -fsSL \
+           -A "${USER_AGENT}" \
+           -H "Accept: application/vnd.github.v3.raw" \
+           -H "Accept: text/plain" \
+           --retry 2 \
+           --retry-delay 1 \
+           --retry-max-time 30 \
+           -o "${output}" \
+           "${url}" 2>&1 | while read -r line; do
+        debug "curl: $line"
+      done
+      
+      curl_exit=${PIPESTATUS[0]}
+      
+    elif command -v wget &>/dev/null; then
+      debug "Using wget with enhanced options"
+      
+      wget -q \
+           --user-agent="${USER_AGENT}" \
+           --header="Accept: application/vnd.github.v3.raw" \
+           --header="Accept: text/plain" \
+           --tries=3 \
+           --timeout=30 \
+           -O "${output}" \
+           "${url}" 2>&1 | while read -r line; do
+        debug "wget: $line"
+      done
+      
+      curl_exit=${PIPESTATUS[0]}
+    else
+      die "curl or wget required"
     fi
-  elif command -v wget &>/dev/null; then
-    debug "Using wget for download"
-    wget -q --user-agent="${USER_AGENT}" -O "${output}" "${url}" 2>&1 | while read -r line; do
-      debug "wget: $line"
-    done
-    local wget_exit=$?
-    if [[ $wget_exit -ne 0 ]]; then
-      error "wget failed with exit code: $wget_exit"
-      error "Failed to download from: ${url}"
-      return $wget_exit
+    
+    if [[ $curl_exit -eq 0 ]]; then
+      if [[ -f "${output}" ]] && [[ -s "${output}" ]]; then
+        debug "Download successful on attempt $retry_count"
+        debug "File size: $(wc -c < "${output}") bytes"
+        debug "First 100 chars of content:"
+        head -c 100 "${output}" 2>/dev/null | while read -r line; do
+          debug "  $line"
+        done
+        return 0
+      else
+        debug "File created but empty or doesn't exist"
+        if [[ -f "${output}" ]]; then
+          debug "File exists but size is $(wc -c < "${output}") bytes"
+        fi
+      fi
+    else
+      debug "Download failed with exit code: $curl_exit"
+      
+      # Si tenemos el archivo de salida, mostramos su contenido para debugging
+      if [[ -f "${output}" ]]; then
+        debug "Response content (first 500 chars):"
+        head -c 500 "${output}" 2>/dev/null | cat -v | while read -r line; do
+          debug "  $line"
+        done
+      fi
     fi
-  else
-    die "curl or wget required but not found"
+    
+    # Esperar antes de reintentar (solo si no fue el último intento)
+    if [[ $retry_count -lt $max_retries ]]; then
+      debug "Waiting 1 second before retry..."
+      sleep 1
+    fi
+  done
+  
+  error "Failed to download after $max_retries attempts"
+  error "URL: ${url}"
+  error "Last exit code: $curl_exit"
+  
+  # Mostrar más información si el archivo existe
+  if [[ -f "${output}" ]]; then
+    error "Output file exists with size: $(wc -c < "${output}") bytes"
+    error "First 200 chars of file:"
+    head -c 200 "${output}" 2>/dev/null | cat -v | sed 's/^/  /'
   fi
   
-  if [[ ! -f "${output}" ]]; then
-    error "Download completed but output file not created: ${output}"
-    return 1
-  fi
-  
-  debug "Download successful: ${url} -> ${output}"
-  debug "  File size: $(wc -c < "${output}") bytes"
+  return 1
 }
 
 download_content() {
@@ -178,9 +249,12 @@ download_with_fallback() {
   local file_path="$2"
   local output="${3:-}"
   
+  # Limpiar repo_url de comillas
+  repo_url="$(echo "$repo_url" | sed "s/^'//;s/'$//")"
+  
   local main_url="${repo_url}/raw/main/${file_path}"
   local master_url="${repo_url}/raw/master/${file_path}"
-  
+   
   debug "Trying main branch URL: ${main_url}"
   
   if command -v curl &>/dev/null; then
@@ -287,18 +361,34 @@ parse_config() {
     unset "config[$key]"
   done
   
+  if [[ ! -f "${config_file}" ]] || [[ ! -s "${config_file}" ]]; then
+    debug "Config file does not exist or is empty: ${config_file}"
+    return 1
+  fi
+  
+  debug "Config file exists and has $(wc -l < "${config_file}") lines"
+  
   local line_num=0
   while IFS= read -r line; do
-    ((line_num++))
-    debug "Processing line $line_num: ${line}"
+    line_num=$((line_num + 1))
+    debug "Processing line $line_num: '${line}'"
     
     if [[ "${line}" =~ ^[[:space:]]*files: ]]; then
       debug "Found files section at line $line_num, stopping parsing"
       break
     fi
-    if [[ "${line}" =~ ^[[:space:]]*([^=]+)=['"']?(.*[^'"'])['"']?$ ]]; then
+    
+    # Expresión regular que captura clave y valor (con o sin comillas)
+    if [[ "${line}" =~ ^[[:space:]]*([^=]+)=['\"]?(.*)['\"]?$ ]]; then
       local key="${BASH_REMATCH[1]}"
       local value="${BASH_REMATCH[2]}"
+      
+      # Limpiar espacios y comillas del key
+      key="$(echo "${key}" | sed 's/[[:space:]]*$//')"
+      
+      # Limpiar comillas adicionales del value
+      value="$(echo "${value}" | sed -e "s/^['\"]//" -e "s/['\"]$//")"
+      
       debug "  Parsed key='${key}' value='${value}'"
       config["${key}"]="${value}"
     else
@@ -310,6 +400,8 @@ parse_config() {
   for key in "${!config[@]}"; do
     debug "  ${key}=${config[$key]}"
   done
+  
+  return 0
 }
 
 add_insecure_repo() {
@@ -358,7 +450,7 @@ list_repos() {
   local repo_count=0
   for repo_file in "${ORB_REPOS}"/*; do
     [[ -f "${repo_file}" ]] || continue
-    ((repo_count++))
+    repo_count=$((repo_count + 1))
     debug "  Found repo file: ${repo_file}"
     cat "${repo_file}"
   done
@@ -498,30 +590,80 @@ fetch_repo_packages() {
   fi
 }
 
+#debug
+find_package_in_repo() {
+  local repo_url="$1"
+  local package_name="$2"
+
+  debug "Entering find_package_in_repo"
+  debug "  Repository URL: ${repo_url}"
+  debug "  Package name: ${package_name}"
+
+  local repo_content
+  repo_content="$(fetch_repo_packages "${repo_url}" 2>/dev/null || true)"
+
+  if [[ -z "${repo_content}" ]]; then
+    debug "No content found for repo: ${repo_url}"
+    return 1
+  fi
+
+  debug "Repo content length: ${#repo_content} characters"
+
+  # Buscar líneas que comiencen con packageX=
+  while IFS= read -r line; do
+    debug "Processing line: '${line}'"
+
+    if [[ "${line}" =~ ^package[0-9]+= ]]; then
+      local package_url="${line#*=}"
+      package_url="$(echo "${package_url}" | sed "s/^['\"]//;s/['\"]$//")"
+
+      debug "Found package URL: ${package_url}"
+
+      # Descargar el orb.config de este paquete
+      local config_file
+      config_file="$(mktemp)"
+
+      if download_orb_config "${package_url}" "${config_file}"; then
+        local package_content
+        package_content="$(cat "${config_file}" 2>/dev/null || echo "")"
+        rm -f "${config_file}"
+
+        if echo "${package_content}" | grep -q "packageName='${package_name}'"; then
+          debug "Package found: ${package_name} at ${package_url}"
+          echo "${package_url}"
+          return 0
+        else
+          debug "Package name does not match. Looking for '${package_name}'"
+        fi
+      else
+        debug "Failed to download orb.config from: ${package_url}"
+        rm -f "${config_file}"
+      fi
+    fi
+  done <<< "${repo_content}"
+
+  debug "Package '${package_name}' not found in repo: ${repo_url}"
+  return 1
+}
+
 search_package() {
   debug "Entering search_package function"
   debug "  Package: $1"
   debug "  Version: ${2:-not specified}"
-  
+
   local package="$1"
   local version="${2:-}"
   local found=()
-  
+
   log "Searching in official repository..."
-  debug "Fetching official packages list"
-  local official_content
-  if official_content="$(fetch_official_packages 2>/dev/null)"; then
-    debug "Official packages fetched successfully"
-    if echo "${official_content}" | grep -q "packageName='${package}'"; then
-      debug "Found package '${package}' in official repository"
-      found+=("official::${OFFICIAL_REPO}")
-    else
-      debug "Package '${package}' NOT found in official repository"
-    fi
+  local package_url
+  if package_url="$(find_package_in_repo "${OFFICIAL_REPO}" "${package}")"; then
+    debug "Found package '${package}' in official repository at: ${package_url}"
+    found+=("official::${package_url}")
   else
-    debug "Failed to fetch official packages"
+    debug "Package '${package}' NOT found in official repository"
   fi
-  
+
   debug "Checking user repositories"
   local repo_list
   repo_list="$(list_repos)"
@@ -531,38 +673,24 @@ search_package() {
       [[ -z "${repo}" ]] && continue
       debug "Searching in repository: ${repo}"
       log "Searching in ${repo}..."
-      local repo_content
-      if repo_content="$(fetch_repo_packages "${repo}" 2>/dev/null)"; then
-        if echo "${repo_content}" | grep -q "packageName='${package}'"; then
-          debug "Found package '${package}' in repository: ${repo}"
-          found+=("unofficial::${repo}")
-        else
-          debug "Package '${package}' NOT found in repository: ${repo}"
-        fi
+      if package_url="$(find_package_in_repo "${repo}" "${package}")"; then
+        debug "Found package '${package}' in repository: ${repo} at ${package_url}"
+        found+=("unofficial::${package_url}")
       else
-        debug "Failed to fetch packages from repository: ${repo}"
+        debug "Package '${package}' NOT found in repository: ${repo}"
       fi
     done <<< "${repo_list}"
   else
     debug "No user repositories configured"
   fi
-  
+
   debug "Search complete. Found ${#found[@]} location(s)"
-  
+
   if [[ ${#found[@]} -eq 0 ]]; then
     error "Package '${package}' not found in any repository"
-    error "Searched in:"
-    error "  - Official repository: ${OFFICIAL_REPO}"
-    if [[ -n "${repo_list}" ]]; then
-      error "  - User repositories:"
-      while IFS= read -r repo; do
-        [[ -z "${repo}" ]] && continue
-        error "    - ${repo}"
-      done <<< "${repo_list}"
-    fi
     return 1
   fi
-  
+
   debug "Package found in locations:"
   for location in "${found[@]}"; do
     echo "${location}"
@@ -572,57 +700,97 @@ search_package() {
 
 install_package() {
   debug "Entering install_package function"
-  debug "  Package: $1"
-  debug "  Allow insecure: $2"
-  debug "  Version: ${3:-not specified}"
   
-  local package="$1"
-  local allow_insecure="${2:-false}"
-  local version="${3:-}"
+  local package=""
+  local allow_insecure=false
+  local version=""
+  local install_type="local"
   
-  if [[ "${allow_insecure}" == "false" ]]; then
+  debug "Parsing arguments: $*"
+  
+  # Parsear todos los argumentos
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --allow-insecure-repos)
+        allow_insecure=true
+        debug "Found --allow-insecure-repos flag"
+        shift
+        ;;
+      --global)
+        install_type="global"
+        debug "Found --global flag"
+        shift
+        ;;
+      --*)
+        debug "Ignoring unknown flag: $1"
+        shift
+        ;;
+      *)
+        if [[ -z "$package" ]]; then
+          package="$1"
+          debug "Package name: $package"
+        elif [[ -z "$version" ]]; then
+          version="$1"
+          debug "Version: $version"
+        else
+          debug "Ignoring extra argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+  
+  if [[ -z "$package" ]]; then
+    die "Package name required"
+  fi
+  
+  debug "Final parsed values:"
+  debug "  Package: $package"
+  debug "  Allow insecure: $allow_insecure"
+  debug "  Version: ${version:-latest}"
+  debug "  Install type: $install_type"
+  
+  if [[ "$allow_insecure" == "false" ]]; then
     debug "Checking official repository only (insecure repos not allowed)"
-    local official_content
-    official_content="$(fetch_official_packages 2>/dev/null || true)"
-    
-    if ! echo "${official_content}" | grep -q "packageName='${package}'"; then
-      debug "Package '${package}' not found in official repository"
-      die "Package '${package}' not found in official repository. Use --allow-insecure-repos to search in all repositories"
+    local package_url
+    if package_url="$(find_package_in_repo "$OFFICIAL_REPO" "$package")"; then
+      debug "Package found in official repository at: $package_url"
+      install_from_repo "$package" "$package_url" "$version" "$install_type"
+    else
+      debug "Package '$package' not found in official repository"
+      die "Package '$package' not found in official repository. Use --allow-insecure-repos to search in all repositories"
     fi
-    
-    debug "Package found in official repository, proceeding with installation"
-    install_from_repo "${package}" "${OFFICIAL_REPO}" "${version}"
   else
     debug "Searching in all repositories (insecure allowed)"
     local locations
-    locations="$(search_package "${package}" "${version}")" || exit 1
+    locations="$(search_package "$package" "$version")" || exit 1
     
-    if [[ $(echo "${locations}" | wc -l) -gt 1 ]]; then
+    if [[ $(echo "$locations" | wc -l) -gt 1 ]]; then
       debug "Multiple locations found, asking user to choose"
-      log "Multiple locations found for '${package}':"
+      log "Multiple locations found for '$package':"
       local i=1
       while IFS= read -r location; do
-        echo "  $i) ${location}"
-        ((i++))
-      done <<< "${locations}"
+        echo "  $i) $location"
+        i=$((i + 1))
+      done <<< "$locations"
       
       read -rp "Select number (1-$((i-1))): " choice
-      debug "User selected option: ${choice}"
+      debug "User selected option: $choice"
       
-      if ! [[ "${choice}" =~ ^[0-9]+$ ]] || [[ "${choice}" -lt 1 ]] || [[ "${choice}" -gt $((i-1)) ]]; then
-        die "Invalid selection: ${choice}"
+      if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 1 ]] || [[ "$choice" -gt $((i-1)) ]]; then
+        die "Invalid selection: $choice"
       fi
       
       local selected
-      selected="$(echo "${locations}" | sed -n "${choice}p")"
-      debug "Selected location: ${selected}"
+      selected="$(echo "$locations" | sed -n "${choice}p")"
+      debug "Selected location: $selected"
       local repo="${selected#*::}"
-      install_from_repo "${package}" "${repo}" "${version}"
+      install_from_repo "$package" "$repo" "$version" "$install_type"
     else
       debug "Single location found"
       local repo="${locations#*::}"
-      debug "Installing from: ${repo}"
-      install_from_repo "${package}" "${repo}" "${version}"
+      debug "Installing from: $repo"
+      install_from_repo "$package" "$repo" "$version" "$install_type"
     fi
   fi
 }
@@ -632,10 +800,29 @@ install_from_repo() {
   debug "  Package: $1"
   debug "  Repository: $2"
   debug "  Version: ${3:-not specified}"
+  debug "  Install type: ${4:-not specified}"
   
   local package="$1"
   local repo="$2"
   local version="$3"
+  local install_type="${4:-local}"
+  
+  debug "Parsed install_type: '${install_type}'"
+  
+  # Determinar el directorio de instalación basado en el tipo
+  local install_base
+  if [[ "${install_type}" == "global" ]]; then
+    install_base="${ORB_INSTALLED}"
+    debug "Global installation to: ${install_base}"
+  else
+    # Local installation to current directory
+    install_base="$(pwd)/.orb/installed"
+    debug "Local installation to: ${install_base}"
+    
+    # Crear directorio .orb si no existe
+    mkdir -p "${install_base}"
+    debug "Created local directory: ${install_base}"
+  fi
   
   debug "Creating temporary config file"
   local config_file
@@ -644,16 +831,30 @@ install_from_repo() {
   
   debug "Downloading orb.config from ${repo}"
   if ! download_orb_config "${repo}" "${config_file}"; then
+    debug "Failed to download orb.config, removing temp file"
     rm -f "${config_file}"
     die "Failed to download orb.config from ${repo}"
   fi
   
+  debug "Config file downloaded successfully"
+  debug "Config file content (first 30 lines):"
+  head -n 30 "${config_file}" | while IFS= read -r line; do
+    debug "  $line"
+  done
+  
   debug "Parsing config file"
-  parse_config "${config_file}"
+  if ! parse_config "${config_file}"; then
+    error "Failed to parse config file"
+    debug "Config file content for debugging:"
+    cat "${config_file}" >&2
+    rm -f "${config_file}"
+    die "Invalid config file from ${repo}"
+  fi
   
   debug "Validating package name"
   if [[ "${config[packageName]}" != "${package}" ]]; then
     debug "Package mismatch: expected '${package}', found '${config[packageName]}'"
+    debug "Available keys in config: ${!config[@]}"
     rm -f "${config_file}"
     die "Package mismatch in config. Expected '${package}', found '${config[packageName]}'"
   fi
@@ -661,7 +862,7 @@ install_from_repo() {
   local install_version="${version:-${config[version]}}"
   debug "Install version determined: ${install_version}"
   
-  local install_dir="${ORB_INSTALLED}/${package}/${install_version}"
+  local install_dir="${install_base}/${package}/${install_version}"
   debug "Install directory: ${install_dir}"
   
   debug "Creating install directory"
@@ -676,52 +877,125 @@ install_from_repo() {
   debug "Processing files section"
   local files_section=false
   local file_count=0
+  
+  debug "Reading config file for files section"
   while IFS= read -r line; do
+    debug "DEBUG TOP - files_section=${files_section}, file_count=${file_count}"
+    debug "Read line: '${line}'"
+    
     if [[ "${line}" =~ ^[[:space:]]*files: ]]; then
       debug "Entered files section"
       files_section=true
       continue
     fi
+    
     if [[ "${files_section}" == true ]]; then
+      debug "DEBUG - INSIDE files_section"
+      
+      if [[ "${line}" =~ ^[[:space:]]*[a-zA-Z_][a-zA-Z0-9_]*= ]] && [[ -n "${line// }" ]]; then
+        debug "DEBUG - BREAKING: Found new key-value pair"
+        break
+      fi
+      
       if [[ -z "${line// }" ]]; then
+        debug "Skipping empty line"
         continue
       fi
-      if [[ "${line}" =~ ^[[:space:]]*\".*\"[[:space:]]+\'(.*)\' ]]; then
-        local file_url="${BASH_REMATCH[1]}"
-        local file_name
-        file_name="$(echo "${line}" | cut -d'"' -f2)"
-        ((file_count++))
-        debug "Downloading file #${file_count}: ${file_name} from ${file_url}"
-        download "${file_url}" "${install_dir}/${file_name}"
-        if [[ $? -eq 0 ]]; then
-          debug "Successfully downloaded ${file_name}"
+      
+      debug "Processing file entry: '${line}'"
+      
+      local clean_line="${line#"${line%%[![:space:]]*}"}"
+      clean_line="${clean_line%"${clean_line##*[![:space:]]}"}"
+      
+      debug "Clean line: '${clean_line}'"
+      
+      if [[ "${clean_line}" =~ ^\"([^\"]+)\" ]]; then
+        local file_name="${BASH_REMATCH[1]}"
+        debug "Found file name: '${file_name}'"
+        
+        local remaining="${clean_line#*\"${file_name}\"}"
+        debug "Remaining after file name: '${remaining}'"
+        
+        remaining="$(echo "$remaining" | sed "s/^[[:space:]]*//;s/[[:space:]]*$//")"
+        debug "Cleaned remaining: '${remaining}'"
+        
+        local file_url="${remaining}"
+        file_url="$(echo "$file_url" | sed "s/^'//;s/'$//;s/'$//")"
+        
+        debug "DEBUG - After extraction:"
+        debug "  file_url='${file_url}'"
+        debug "  file_url length: ${#file_url}"
+        debug "  Is file_url non-empty? $([[ -n "$file_url" ]] && echo "YES" || echo "NO")"
+        debug "  Does file_url match http(s) pattern? $([[ "$file_url" =~ ^https?:// ]] && echo "YES" || echo "NO")"
+        debug "  file_count before increment: ${file_count}"
+        
+        if [[ -n "$file_url" ]] && [[ "$file_url" =~ ^https?:// ]]; then
+          file_count=$((file_count + 1))
+          debug "DEBUG - AFTER INCREMENT: file_count=${file_count}"
+          debug "File #${file_count}:"
+          debug "  Name: ${file_name}"
+          debug "  URL: ${file_url}"
+          
+          local file_dir
+          file_dir="$(dirname "${install_dir}/${file_name}")"
+          if [[ "${file_dir}" != "." ]] && [[ "${file_dir}" != "${install_dir}" ]]; then
+            debug "Creating directory: ${file_dir}"
+            mkdir -p "${file_dir}"
+          fi
+          
+          debug "Downloading file from: ${file_url}"
+          if download "${file_url}" "${install_dir}/${file_name}"; then
+            debug "Successfully downloaded ${file_name}"
+            debug "File size: $(wc -c < "${install_dir}/${file_name}") bytes"
+            debug "First 5 lines of file:"
+            head -n 5 "${install_dir}/${file_name}" 2>/dev/null | while IFS= read -r content_line; do
+              debug "  $content_line"
+            done
+          else
+            error "Failed to download ${file_name} from ${file_url}"
+          fi
         else
-          error "Failed to download ${file_name} from ${file_url}"
+          error "Invalid URL extracted: '${file_url}'"
+          debug "Original line was: '${line}'"
         fi
       else
-        debug "Skipping line (doesn't match file pattern): ${line}"
+        debug "File name not found between double quotes"
       fi
     fi
   done < "${config_file}"
   
   debug "Processed ${file_count} files"
   
-  if [[ "${config[bundleFiles]}" == "true" ]]; then
-    debug "Bundle requested. Bundle files: ${config[bundleFiles]}"
-    debug "Bundle file name: ${config[bundleFileName]:-${config[packageName]}}"
-    bundle_package "${install_dir}" "${config[packageName]}" "${config[bundleFileName]:-${config[packageName]}}"
+  local bundle_files="${config[bundleFiles]:-false}"
+
+  if [[ "${bundle_files}" == "true" ]]; then
+    debug "Bundle requested. Bundle files: ${bundle_files}"
+    local bundle_name="${config[bundleFileName]:-${config[packageName]}}"
+    debug "Bundle file name: ${bundle_name}"
+    bundle_package "${install_dir}" "${config[packageName]}" "${bundle_name}"
   else
-    debug "Bundle not requested"
+    debug "Bundle not requested or not specified"
+  fi
+
+  debug "Saving installation metadata"
+  echo "${install_version} ${repo} $(date -Iseconds)" >> "${install_base}/${package}.meta"
+  
+  if [[ "${install_type}" == "local" ]]; then
+    debug "Updating project dependencies for local installation"
+    create_or_update_orb_json "${package}" "${install_version}"
+  else
+    debug "Skipping orb.json update for global installation"
   fi
   
-  debug "Saving installation metadata"
-  echo "${install_version} ${repo} $(date -Iseconds)" >> "${ORB_INSTALLED}/${package}.meta"
+  log "Installed ${package} ${install_version} (${install_type})"
   
-  log "Successfully installed ${package} ${install_version}"
+  debug "Installation directory contents:"
+  find "${install_dir}" -type f 2>/dev/null | while IFS= read -r file; do
+    debug "  $(basename "${file}") - $(wc -c < "${file}") bytes"
+  done
+  
   debug "Cleaning up temporary config file"
   rm -f "${config_file}"
-  
-  debug "Installation completed successfully"
 }
 
 bundle_package() {
@@ -750,7 +1024,7 @@ EOF
       debug "Skipping bundle file itself"
       continue
     fi
-    ((file_count++))
+    file_count=$((file_count + 1))
     debug "Adding file #${file_count}: ${file}"
     echo "" >> "${bundle_file}"
     echo "# Source: $(basename "${file}")" >> "${bundle_file}"
@@ -764,24 +1038,161 @@ EOF
   debug "Bundle size: $(wc -l < "${bundle_file}") lines"
 }
 
+create_or_update_orb_json() {
+  local package="$1"
+  local version="$2"
+  local orb_json="orb.json"
+  
+  debug "Updating $orb_json with ${package}@${version}"
+  
+  if [[ ! -f "$orb_json" ]]; then
+    cat > "$orb_json" <<EOF
+{
+  "name": "$(basename "$(pwd)")",
+  "version": "1.0.0",
+  "dependencies": {},
+  "devDependencies": {}
+}
+EOF
+    debug "Created new $orb_json"
+  fi
+  
+  if command -v jq &>/dev/null; then
+    jq ".dependencies.\"$package\" = \"$version\"" "$orb_json" > "$orb_json.tmp" && mv "$orb_json.tmp" "$orb_json"
+  else # Try without jq if jq not available
+   
+    debug "Trying without jq (if u see this, install jq to avoid errors)"
+    local temp_file
+    temp_file="$(mktemp)"
+    
+    if grep -q "\"$package\"" "$orb_json"; then
+      sed "s/\"$package\": \"[^\"]*\"/\"$package\": \"$version\"/" "$orb_json" > "$temp_file"
+    else
+      sed "/\"dependencies\": {/a\    \"$package\": \"$version\"," "$orb_json" | 
+        sed 's/\"dependencies\": {,\n/\"dependencies\": {\n/' > "$temp_file"
+    fi
+    
+    mv "$temp_file" "$orb_json"
+  fi
+  
+  log "Added ${package}@${version} to $orb_json"
+}
+
+remove_from_orb_json() {
+  local package="$1"
+  local orb_json="orb.json"
+  
+  if [[ ! -f "$orb_json" ]]; then
+    return 0
+  fi
+  
+  debug "Removing ${package} from $orb_json"
+  
+  if command -v jq &>/dev/null; then
+    jq "del(.dependencies.\"$package\")" "$orb_json" > "$orb_json.tmp" && mv "$orb_json.tmp" "$orb_json"
+  else
+    local temp_file
+    temp_file="$(mktemp)"
+    
+    # Eliminar línea de dependencia
+    grep -v "\"$package\":" "$orb_json" > "$temp_file"
+    mv "$temp_file" "$orb_json"
+  fi
+  
+  debug "Removed ${package} from $orb_json"
+}
+
 uninstall_package() {
   debug "Entering uninstall_package function"
-  debug "  Package: $1"
   
-  local package="$1"
-  local package_dir="${ORB_INSTALLED}/${package}"
+  local force=false
+  local global=false
+  local package=""
   
-  debug "Checking if package is installed"
+  debug "Parsing arguments: $*"
+  
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force)
+        force=true
+        debug "Force flag detected"
+        shift
+        ;;
+      --global)
+        global=true
+        debug "Global flag detected"
+        shift
+        ;;
+      *)
+        package="$1"
+        debug "Package name: ${package}"
+        shift
+        ;;
+    esac
+  done
+  
+  if [[ -z "${package}" ]]; then
+    die "Package name required"
+  fi
+  
+  # Determinar directorio base basado en global/local
+  local install_base
+  if [[ "${global}" == "true" ]]; then
+    install_base="${ORB_INSTALLED}"
+    debug "Global uninstall from: ${install_base}"
+  else
+    install_base="$(pwd)/.orb/installed"
+    debug "Local uninstall from: ${install_base}"
+  fi
+  
+  local package_dir="${install_base}/${package}"
+  local meta_file="${install_base}/${package}.meta"
+  
+  debug "Package directory: ${package_dir}"
+  debug "Metadata file: ${meta_file}"
+  
   if [[ ! -d "${package_dir}" ]]; then
     debug "Package directory not found: ${package_dir}"
+    
+    # Si estamos en modo local y no encontramos, sugerir usar --global
+    if [[ "${global}" != "true" ]] && [[ -d "${ORB_INSTALLED}/${package}" ]]; then
+      error "Package '${package}' found in global installation"
+      error "Try: orb uninstall ${package} --global"
+    fi
+    
     die "Package '${package}' is not installed"
   fi
   
   debug "Package found. Listing installed versions:"
-  find "${package_dir}" -maxdepth 1 -type d -name "*" | while read -r version_dir; do
-    [[ "${version_dir}" == "${package_dir}" ]] && continue
-    debug "  - $(basename "${version_dir}")"
+  local versions=()
+  for version_dir in "${package_dir}"/*; do
+    if [[ -d "${version_dir}" ]]; then
+      local version_name
+      version_name="$(basename "${version_dir}")"
+      versions+=("${version_name}")
+      debug "  - ${version_name}"
+    fi
   done
+  
+  if [[ ${#versions[@]} -eq 0 ]]; then
+    debug "No version directories found in ${package_dir}"
+    echo "No installed versions found for ${package}"
+  else
+    echo "The following versions of '${package}' will be removed:"
+    for version in "${versions[@]}"; do
+      echo "  - ${version}"
+    done
+    
+    if [[ "${force}" != "true" ]]; then
+      read -rp "Are you sure? [y/N]: " confirm
+      if [[ "${confirm}" != "y" ]] && [[ "${confirm}" != "Y" ]]; then
+        log "Uninstallation cancelled"
+        return 0
+      fi
+    else
+      debug "Force mode enabled, skipping confirmation"
+    fi
+  fi
   
   debug "Removing package directory: ${package_dir}"
   if ! rm -rf "${package_dir}"; then
@@ -789,14 +1200,30 @@ uninstall_package() {
     return 1
   fi
   
-  debug "Removing metadata file: ${ORB_INSTALLED}/${package}.meta"
-  rm -f "${ORB_INSTALLED}/${package}.meta"
+  debug "Removing metadata file: ${meta_file}"
+  if [[ -f "${meta_file}" ]]; then
+    rm -f "${meta_file}"
+  fi
   
-  log "Successfully uninstalled ${package}"
+  # Solo remover de orb.json para instalaciones locales
+  if [[ "${global}" != "true" ]]; then
+    debug "Removing from project dependencies"
+    remove_from_orb_json "${package}"
+  fi
+  
+  local cache_dir="${ORB_CACHE}/${package}"
+  if [[ -d "${cache_dir}" ]]; then
+    debug "Removing from cache: ${cache_dir}"
+    rm -rf "${cache_dir}"
+  fi
+  
+  local location="local"
+  [[ "${global}" == "true" ]] && location="global"
+  
+  log "Uninstalled ${package} (${location})"
+  debug "Package removal completed successfully"
 }
 
-
-# list packages
 list_packages() {
   debug "Entering list_packages function"
   debug "  Allow insecure: $1"
@@ -1036,23 +1463,43 @@ bundle_file() {
     if [[ "${line}" =~ ^[[:space:]]*#[[:space:]]*orb[[:space:]]+import[[:space:]]+([^[:space:]]+)([[:space:]]+([^[:space:]]+))? ]]; then
       local package="${BASH_REMATCH[1]}"
       local version="${BASH_REMATCH[3]}"
-      ((import_count++))
+      import_count=$((import_count + 1))
       
       debug "Found import at line ${current_line}:"
       debug "  Package: ${package}"
       debug "  Version: ${version:-latest}"
       
-      if [[ ! -d "${ORB_INSTALLED}/${package}" ]]; then
+      # Buscar primero en local (./.orb/installed), luego en global (~/.orb/installed)
+      local local_install_dir="./.orb/installed/${package}"
+      local global_install_dir="${ORB_INSTALLED}/${package}"
+      
+      local install_base
+      if [[ -d "${local_install_dir}" ]]; then
+        install_base="${local_install_dir}"
+        debug "Found package in local installation"
+      elif [[ -d "${global_install_dir}" ]]; then
+        install_base="${global_install_dir}"
+        debug "Found package in global installation"
+      else
         die "Package '${package}' not installed. Run 'orb install ${package}' first"
       fi
       
       local install_dir
       if [[ -n "${version}" ]]; then
-        install_dir="${ORB_INSTALLED}/${package}/${version}"
+        install_dir="${install_base}/${version}"
         debug "Looking for specific version: ${install_dir}"
       else
         debug "Looking for latest version of ${package}"
-        install_dir="$(find "${ORB_INSTALLED}/${package}" -type d -mindepth 1 -maxdepth 1 | sort -V | tail -n1)"
+        
+        # Filtrar solo directorios que parezcan versiones
+        local latest_version
+        latest_version="$(find "${install_base}" -maxdepth 1 -mindepth 1 -type d -printf "%f\n" | grep -E '^[0-9]+(\.[0-9]+)*$' | sort -V | tail -n1)"
+        
+        if [[ -z "${latest_version}" ]]; then
+          die "No valid version found for package '${package}'"
+        fi
+        
+        install_dir="${install_base}/${latest_version}"
         debug "Latest version directory: ${install_dir}"
       fi
       
@@ -1069,28 +1516,36 @@ bundle_file() {
       parse_config "${config_file}"
       
       debug "Checking if package is bundlable: ${config[isPackageBundlable]:-false}"
-      if [[ "${config[isPackageBundlable]}" == "false" ]]; then
+      local is_bundlable="${config[isPackageBundlable]:-false}"
+      if [[ "${is_bundlable}" == "false" ]]; then
         debug "Package is not marked as bundlable, but proceeding anyway"
       fi
       
-      if [[ "${config[bundleFiles]}" == "true" ]] && [[ -f "${install_dir}/${config[bundleFileName]:-${config[packageName]}}.sh" ]]; then
-        debug "Using pre-bundled file: ${install_dir}/${config[bundleFileName]:-${config[packageName]}}.sh"
-        cat "${install_dir}/${config[bundleFileName]:-${config[packageName]}}.sh" >> "${bundled_file}"
+      local bundle_files="${config[bundleFiles]:-false}"
+      local bundle_name="${config[bundleFileName]:-${config[packageName]}}"
+      
+      if [[ "${bundle_files}" == "true" ]] && [[ -f "${install_dir}/${bundle_name}.sh" ]]; then
+        debug "Using pre-bundled file: ${install_dir}/${bundle_name}.sh"
+        cat "${install_dir}/${bundle_name}.sh" >> "${bundled_file}"
         echo "" >> "${bundled_file}"
       else
         debug "Bundling individual files"
         local file_count=0
-        for file in "${install_dir}"/*.sh; do
-          [[ -f "${file}" ]] || continue
-          if [[ "${file}" == "${install_dir}/${config[bundleFileName]:-${config[packageName]}}.sh" ]]; then
+        # Buscar todos los archivos en el directorio de instalación (recursivamente)
+        while IFS= read -r file; do
+          # Saltar directorios
+          [[ -f "$file" ]] || continue
+          # Saltar el archivo de configuración y el bundle pre-empaquetado si existe
+          local filename=$(basename "$file")
+          if [[ "$filename" == "orb.config" ]] || [[ "$filename" == ".source" ]] || [[ "$filename" == "${bundle_name}.sh" ]]; then
             continue
           fi
-          ((file_count++))
+          file_count=$((file_count + 1))
           debug "  Adding file #${file_count}: ${file}"
-          echo "# Source: $(basename "${file}") from ${package} ${version:-latest}" >> "${bundled_file}"
+          echo "# Source: ${file#${install_dir}/} from ${package} ${version:-latest}" >> "${bundled_file}"
           cat "${file}" >> "${bundled_file}"
           echo "" >> "${bundled_file}"
-        done
+        done < <(find "${install_dir}" -type f ! -name "orb.config" ! -name ".source" ! -name "${bundle_name}.sh")
         debug "Added ${file_count} files from package ${package}"
       fi
     else
@@ -1162,36 +1617,98 @@ EOF
       add_insecure_repo "$2"
       ;;
     
+    init)
+      [[ $# -ge 2 ]] || die "Project name required"
+      local project_name="$2"
+      local version="${3:-1.0.0}"
+      
+      if [[ -f "orb.json" ]]; then
+        die "orb.json already exists in this directory"
+      fi
+      
+      cat > "orb.json" <<EOF
+{
+  "name": "${project_name}",
+  "version": "${version}",
+  "description": "",
+  "main": "main.sh",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
+EOF
+      log "Initialized empty orb project in $(pwd)"
+      log "Created orb.json"
+      ;;
+
     install)
       debug "Processing install command"
-      [[ $# -ge 2 ]] || die "Package name required for install command"
+      [[ $# -ge 2 ]] || die "Package name required"
       local allow_insecure=false
+      local global=false
       local package="$2"
       local version="${3:-}"
       
-      debug "Checking for --allow-insecure-repos flag"
+      debug "Checking for flags"
       for arg in "$@"; do
         if [[ "${arg}" == "--allow-insecure-repos" ]]; then
           allow_insecure=true
           debug "Found --allow-insecure-repos flag"
-          break
+        fi
+        if [[ "${arg}" == "--global" ]]; then
+          global=true
+          debug "Found --global flag"
         fi
       done
       
       debug "Installing package: ${package}"
       debug "  Allow insecure: ${allow_insecure}"
+      debug "  Global: ${global}"
       debug "  Version: ${version:-latest}"
-      
-      install_package "${package}" "${allow_insecure}" "${version}"
+     
+      shift
+      install_package "$@"
       ;;
-    
+
     uninstall)
       debug "Processing uninstall command"
-      [[ $# -ge 2 ]] || die "Package name required for uninstall command"
-      debug "Uninstalling package: $2"
-      uninstall_package "$2"
+      [[ $# -ge 2 ]] || die "Package name required"
+      local force=false
+      local global=false
+      local package="$2"
+      
+      debug "Checking for flags"
+      for arg in "$@"; do
+        if [[ "${arg}" == "--force" ]]; then
+          force=true
+          debug "Found --force flag"
+        fi
+        if [[ "${arg}" == "--global" ]]; then
+          global=true
+          debug "Found --global flag"
+        fi
+      done
+      
+      debug "Uninstalling package: ${package}"
+      debug "  Force: ${force}"
+      debug "  Global: ${global}"
+      
+      if [[ "${force}" == "true" ]] && [[ "${global}" == "true" ]]; then
+        uninstall_package "${package}" "--force" "--global"
+      elif [[ "${force}" == "true" ]]; then
+        uninstall_package "${package}" "--force"
+      elif [[ "${global}" == "true" ]]; then
+        uninstall_package "${package}" "--global"
+      else
+        uninstall_package "${package}"
+      fi
       ;;
-    
+
     list)
       debug "Processing list command"
       local allow_insecure=false
