@@ -1,7 +1,7 @@
 # Orb - Bash Package Manager
 
 [![License: MIT](https://img.shields.io/badge/License-GPLV3-yellow.svg)](https://opensource.org/licenses/GPLV3)
-[![Version](https://img.shields.io/badge/version-0.1.1-blue.svg)](https://github.com/stringmanolo/orb)
+[![Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](https://github.com/stringmanolo/orb)
 
 A lightweight, powerful package manager for Bash scripts. Install, manage, and bundle Bash libraries with ease.
 
