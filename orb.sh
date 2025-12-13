@@ -4,7 +4,7 @@ set -euo pipefail
 
 : "${ORB_DEBUG:=0}"
 
-ORB_VERSION="0.1.1"
+ORB_VERSION="0.1.2"
 ORB_HOME="${HOME}/.orb"
 ORB_CACHE="${ORB_HOME}/cache"
 ORB_INSTALLED="${ORB_HOME}/installed"
@@ -406,6 +406,221 @@ parse_config() {
   return 0
 }
 
+list_installed() {
+  debug "Entering list_installed function"
+  debug "  Scope: ${1:-local}"
+  
+  local scope="${1:-local}"  
+  local show_global=false
+  local show_local=false
+  
+  case "$scope" in
+    "global")
+      show_global=true
+      ;;
+    "local")
+      show_local=true
+      ;;
+    "all")
+      show_global=true
+      show_local=true
+      ;;
+    *)
+      error "Invalid scope: $scope. Use 'local', 'global', or 'all'"
+      return 1
+      ;;
+  esac
+  
+  local total_packages=0
+  local total_versions=0
+  
+  if [[ "$show_local" == "true" ]]; then
+    local local_base="$(pwd)/.orb/installed"
+    debug "Checking local installation directory: ${local_base}"
+    
+    if [[ -d "${local_base}" ]]; then
+      local local_count=0
+      local local_version_count=0
+      
+      echo ""
+      echo "=== Local installations (in $(pwd)) ==="
+      
+      for package_dir in "${local_base}"/*; do
+        if [[ -d "${package_dir}" ]]; then
+          local package_name
+          package_name="$(basename "${package_dir}")"
+          local_count=$((local_count + 1))
+          
+          echo ""
+          echo "${package_name}:"
+          
+          for version_dir in "${package_dir}"/*; do
+            if [[ -d "${version_dir}" ]]; then
+              local version
+              version="$(basename "${version_dir}")"
+              local_version_count=$((local_version_count + 1))
+              
+              local config_file="${version_dir}/orb.config"
+              local author="unknown"
+              local description=""
+              
+              if [[ -f "${config_file}" ]]; then
+                if grep -q "author=" "${config_file}"; then
+                  author=$(grep "author=" "${config_file}" | head -1 | sed "s/^[[:space:]]*author=['\"]\?//" | sed "s/['\"].*$//")
+                fi
+                
+                if grep -q "shortDescription=" "${config_file}"; then
+                  description=$(grep "shortDescription=" "${config_file}" | head -1 | sed "s/^[[:space:]]*shortDescription=['\"]\?//" | sed "s/['\"].*$//")
+                fi
+              fi
+              
+              echo "  ├── Version: ${version}"
+              echo "  │   ├── Location: ${version_dir}"
+              [[ -n "$author" ]] && echo "  │   ├── Author: ${author}"
+              [[ -n "$description" ]] && echo "  │   ├── Description: ${description}"
+              
+              local source_file="${version_dir}/.source"
+              if [[ -f "${source_file}" ]]; then
+                local repo_url
+                repo_url="$(cat "${source_file}" 2>/dev/null | head -1)"
+                echo "  │   ├── Source: ${repo_url}"
+              fi
+              
+              echo "  │   └── Files:"
+              find "${version_dir}" -type f -name "*.sh" | while read -r file; do
+                if [[ "$(basename "$file")" != "orb.config" ]] && [[ "$(basename "$file")" != ".source" ]]; then
+                  echo "  │       └── $(basename "$file") ($(wc -l < "$file") lines)"
+                fi
+              done
+            fi
+          done
+          
+          local meta_file="${local_base}/${package_name}.meta"
+          if [[ -f "${meta_file}" ]]; then
+            echo "  └── Metadata:"
+            while IFS= read -r meta_line; do
+              echo "        ${meta_line}"
+            done < "${meta_file}"
+          fi
+        fi
+      done
+      
+      if [[ $local_count -eq 0 ]]; then
+        echo "No packages installed locally."
+      else
+        echo ""
+        echo "Summary: ${local_count} package(s) with ${local_version_count} version(s) installed locally."
+      fi
+      
+      total_packages=$((total_packages + local_count))
+      total_versions=$((total_versions + local_version_count))
+    else
+      echo ""
+      echo "=== Local installations ==="
+      echo "No local installation directory found."
+      echo "Run 'orb install <package>' first to install packages locally."
+    fi
+  fi
+  
+  if [[ "$show_global" == "true" ]]; then
+    debug "Checking global installation directory: ${ORB_INSTALLED}"
+    
+    if [[ -d "${ORB_INSTALLED}" ]]; then
+      local global_count=0
+      local global_version_count=0
+      
+      echo ""
+      echo "=== Global installations (in ${ORB_INSTALLED}) ==="
+      
+      for package_dir in "${ORB_INSTALLED}"/*; do
+        if [[ -d "${package_dir}" ]]; then
+          local package_name
+          package_name="$(basename "${package_dir}")"
+          global_count=$((global_count + 1))
+          
+          echo ""
+          echo "${package_name}:"
+          
+          for version_dir in "${package_dir}"/*; do
+            if [[ -d "${version_dir}" ]]; then
+              local version
+              version="$(basename "${version_dir}")"
+              global_version_count=$((global_version_count + 1))
+              
+              local config_file="${version_dir}/orb.config"
+              local author="unknown"
+              local description=""
+              
+              if [[ -f "${config_file}" ]]; then
+                if grep -q "author=" "${config_file}"; then
+                  author=$(grep "author=" "${config_file}" | head -1 | sed "s/^[[:space:]]*author=['\"]\?//" | sed "s/['\"].*$//")
+                fi
+                
+                if grep -q "shortDescription=" "${config_file}"; then
+                  description=$(grep "shortDescription=" "${config_file}" | head -1 | sed "s/^[[:space:]]*shortDescription=['\"]\?//" | sed "s/['\"].*$//")
+                fi
+              fi
+              
+              echo "  ├── Version: ${version}"
+              echo "  │   ├── Location: ${version_dir}"
+              [[ -n "$author" ]] && echo "  │   ├── Author: ${author}"
+              [[ -n "$description" ]] && echo "  │   ├── Description: ${description}"
+              
+              local source_file="${version_dir}/.source"
+              if [[ -f "${source_file}" ]]; then
+                local repo_url
+                repo_url="$(cat "${source_file}" 2>/dev/null | head -1)"
+                echo "  │   ├── Source: ${repo_url}"
+              fi
+              
+              echo "  │   └── Files:"
+              find "${version_dir}" -type f -name "*.sh" | while read -r file; do
+                if [[ "$(basename "$file")" != "orb.config" ]] && [[ "$(basename "$file")" != ".source" ]]; then
+                  echo "  │       └── $(basename "$file") ($(wc -l < "$file") lines)"
+                fi
+              done
+            fi
+          done
+          
+          local meta_file="${ORB_INSTALLED}/${package_name}.meta"
+          if [[ -f "${meta_file}" ]]; then
+            echo "  └── Metadata:"
+            while IFS= read -r meta_line; do
+              echo "        ${meta_line}"
+            done < "${meta_file}"
+          fi
+        fi
+      done
+      
+      if [[ $global_count -eq 0 ]]; then
+        echo "No packages installed globally."
+      else
+        echo ""
+        echo "Summary: ${global_count} package(s) with ${global_version_count} version(s) installed globally."
+      fi
+      
+      total_packages=$((total_packages + global_count))
+      total_versions=$((total_versions + global_version_count))
+    else
+      echo ""
+      echo "=== Global installations ==="
+      echo "No global installation directory found."
+      echo "Run 'orb install <package> --global' first to install packages globally."
+    fi
+  fi
+  
+  if [[ "$scope" == "all" ]] && [[ $total_packages -gt 0 ]]; then
+    echo ""
+    echo "="*50
+    echo "TOTAL: ${total_packages} package(s) with ${total_versions} version(s) installed"
+    echo "="*50
+  fi
+  
+  debug "Listed ${total_packages} packages with ${total_versions} versions"
+  return 0
+}
+
+
 add_insecure_repo() {
   debug "Entering add_insecure_repo function"
   debug "  Repository URL: $1"
@@ -476,10 +691,8 @@ fetch_official_packages() {
   local content
   local exit_code=0
   
-  # Usar un enfoque diferente para evitar capturar mensajes de debug
   if [[ -n "${ORB_DEBUG}" ]]; then
     debug "Using debug-aware download method"
-    # En modo debug, descargar a un archivo temporal primero
     local temp_file
     temp_file="$(mktemp)"
     
@@ -509,7 +722,6 @@ fetch_official_packages() {
   
   if [[ $exit_code -eq 0 ]] && [[ -n "${content}" ]] && echo "${content}" | grep -q "type="; then
     debug "Successfully fetched official packages from main branch"
-    # Solo devolver el contenido puro, sin mensajes de debug
     echo "${content}"
     return 0
   else
@@ -520,7 +732,6 @@ fetch_official_packages() {
   
   debug "Trying master branch URL: ${master_url}"
   
-  # Repetir para master branch
   if [[ -n "${ORB_DEBUG}" ]]; then
     debug "Trying master branch with debug-aware method"
     temp_file="$(mktemp)"
@@ -592,7 +803,6 @@ fetch_repo_packages() {
   fi
 }
 
-#debug
 find_package_in_repo() {
   local repo_url="$1"
   local package_name="$2"
@@ -611,7 +821,6 @@ find_package_in_repo() {
 
   debug "Repo content length: ${#repo_content} characters"
 
-  # Buscar líneas que comiencen con packageX=
   while IFS= read -r line; do
     debug "Processing line: '${line}'"
 
@@ -621,7 +830,6 @@ find_package_in_repo() {
 
       debug "Found package URL: ${package_url}"
 
-      # Descargar el orb.config de este paquete
       local config_file
       config_file="$(mktemp)"
 
@@ -710,7 +918,6 @@ install_package() {
   
   debug "Parsing arguments: $*"
   
-  # Parsear todos los argumentos
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --allow-insecure-repos)
@@ -811,17 +1018,14 @@ install_from_repo() {
   
   debug "Parsed install_type: '${install_type}'"
   
-  # Determinar el directorio de instalación basado en el tipo
   local install_base
   if [[ "${install_type}" == "global" ]]; then
     install_base="${ORB_INSTALLED}"
     debug "Global installation to: ${install_base}"
   else
-    # Local installation to current directory
     install_base="$(pwd)/.orb/installed"
     debug "Local installation to: ${install_base}"
     
-    # Crear directorio .orb si no existe
     mkdir -p "${install_base}"
     debug "Created local directory: ${install_base}"
   fi
@@ -1096,7 +1300,6 @@ remove_from_orb_json() {
     local temp_file
     temp_file="$(mktemp)"
     
-    # Eliminar línea de dependencia
     grep -v "\"$package\":" "$orb_json" > "$temp_file"
     mv "$temp_file" "$orb_json"
   fi
@@ -1137,7 +1340,6 @@ uninstall_package() {
     die "Package name required"
   fi
   
-  # Determinar directorio base basado en global/local
   local install_base
   if [[ "${global}" == "true" ]]; then
     install_base="${ORB_INSTALLED}"
@@ -1156,7 +1358,6 @@ uninstall_package() {
   if [[ ! -d "${package_dir}" ]]; then
     debug "Package directory not found: ${package_dir}"
     
-    # Si estamos en modo local y no encontramos, sugerir usar --global
     if [[ "${global}" != "true" ]] && [[ -d "${ORB_INSTALLED}/${package}" ]]; then
       error "Package '${package}' found in global installation"
       error "Try: orb uninstall ${package} --global"
@@ -1207,7 +1408,6 @@ uninstall_package() {
     rm -f "${meta_file}"
   fi
   
-  # Solo remover de orb.json para instalaciones locales
   if [[ "${global}" != "true" ]]; then
     debug "Removing from project dependencies"
     remove_from_orb_json "${package}"
@@ -1236,14 +1436,12 @@ list_packages() {
   debug "Fetching official packages"
   local official_content
   
-  # Manejar modo debug separadamente
   if [ -n "${ORB_DEBUG}" ] && [ "${ORB_DEBUG}" != "0" ] && [ "${ORB_DEBUG}" != "false" ]; then
     debug "Running fetch_official_packages in debug mode"
     local temp_stderr
     temp_stderr="$(mktemp)"
     official_content="$(fetch_official_packages 2>"${temp_stderr}" || true)"
     
-    # Mostrar los mensajes de debug desde stderr
     if [ -s "${temp_stderr}" ]; then
       while IFS= read -r line; do
         debug "$line"
@@ -1266,7 +1464,6 @@ list_packages() {
       debug "  '$line'"
     done
     
-    # Contar las líneas que son paquetes
     local package_lines
     package_lines="$(echo "${official_content}" | grep -c '^package[0-9]\+=' || echo "0")"
     debug "Found $package_lines package lines in official content"
@@ -1278,19 +1475,15 @@ list_packages() {
     else
       debug "Processing each package line"
       
-      # Procesar cada línea que comience con packageX=
       echo "${official_content}" | grep '^package[0-9]\+=' | while IFS= read -r line; do
         debug "Processing package line: '$line'"
         
-        # Extraer la URL, quitando comillas simples o dobles
         local package_url="${line#*=}"
         debug "Raw package URL: '$package_url'"
         
-        # Limpiar comillas
         package_url="$(echo "$package_url" | sed "s/^['\"]//;s/['\"]$//")"
         debug "Cleaned package URL: '$package_url'"
         
-        # Descargar el orb.config del paquete
         local package_content=""
         local config_file
         config_file="$(mktemp)"
@@ -1303,7 +1496,6 @@ list_packages() {
           if [ -n "$package_content" ] && echo "$package_content" | grep -q "type="; then
             debug "Successfully downloaded package config"
             
-            # Parsear el contenido del paquete
             declare -A pkg_config
             local in_files=false
             
@@ -1383,7 +1575,6 @@ list_packages() {
         continue
       fi
       
-      # Procesar paquetes del repositorio no oficial
       echo "$repo_content" | grep '^package[0-9]\+=' | while IFS= read -r line; do
         if echo "$line" | grep -q '^package[0-9]\+='; then
           local package_url="${line#*=}"
@@ -1471,7 +1662,6 @@ bundle_file() {
       debug "  Package: ${package}"
       debug "  Version: ${version:-latest}"
       
-      # Buscar primero en local (./.orb/installed), luego en global (~/.orb/installed)
       local local_install_dir="./.orb/installed/${package}"
       local global_install_dir="${ORB_INSTALLED}/${package}"
       
@@ -1493,7 +1683,6 @@ bundle_file() {
       else
         debug "Looking for latest version of ${package}"
         
-        # Filtrar solo directorios que parezcan versiones
         local latest_version
         latest_version="$(find "${install_base}" -maxdepth 1 -mindepth 1 -type d -printf "%f\n" | grep -E '^[0-9]+(\.[0-9]+)*$' | sort -V | tail -n1)"
         
@@ -1533,11 +1722,8 @@ bundle_file() {
       else
         debug "Bundling individual files"
         local file_count=0
-        # Buscar todos los archivos en el directorio de instalación (recursivamente)
         while IFS= read -r file; do
-          # Saltar directorios
           [[ -f "$file" ]] || continue
-          # Saltar el archivo de configuración y el bundle pre-empaquetado si existe
           local filename=$(basename "$file")
           if [[ "$filename" == "orb.config" ]] || [[ "$filename" == ".source" ]] || [[ "$filename" == "${bundle_name}.sh" ]]; then
             continue
@@ -1767,6 +1953,7 @@ Commands:
   install <package> [version]   Install a package (local by default)
   uninstall <package>           Uninstall a package
   list                          List available packages
+  installed [scope]             List installed packages
   bundle <file> [output]        Bundle a file with imports
   init <name> [version]         Initialize a new orb project
   --allow-insecure-repo <url>   Add an insecure repository
@@ -1782,6 +1969,12 @@ Options:
   --force                       Force uninstall without confirmation
   --version                     Show version
   --help                        Show this help
+
+Installed command scopes:
+  installed                     Show locally installed packages (default)
+  installed --global            Show globally installed packages
+  installed --all               Show all installed packages (local + global)
+
 
 Debug:
   Set ORB_DEBUG=1 for debug output
@@ -1911,6 +2104,27 @@ EOF
       list_packages "${allow_insecure}"
       ;;
     
+    installed)
+      debug "Processing installed command"
+      local scope="local"
+      
+      for arg in "$@"; do
+        case "$arg" in
+          "--global")
+            scope="global"
+            debug "Found --global flag, showing global installations"
+            ;;
+          "--all")
+            scope="all"
+            debug "Found --all flag, showing all installations"
+            ;;
+        esac
+      done
+      
+      debug "Listing installed packages with scope: ${scope}"
+      list_installed "${scope}"
+      ;;
+
     bundle)
       debug "Processing bundle command"
       [[ $# -ge 2 ]] || die "Input file required for bundle command"
